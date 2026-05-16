@@ -50,17 +50,24 @@ def _col_letter(col_idx):
 def load_genre_catalog(catalog_path=None):
     """
     載入 BW 書種目錄。
-    catalog_path 未指定時，嘗試預設路徑；找不到則回傳空字典（書種欄位將留空）。
+    catalog_path 可為：檔案路徑(str/Path)、BytesIO 或 Streamlit UploadedFile。
+    找不到或解析失敗則回傳空字典（書種欄位將留空）。
     """
     if catalog_path is None:
         base = Path(__file__).parent.parent
         catalog_path = (
             base / "銷售報表" / "Bookwalker書籍商品ID&資料" / "product_fixed.xlsx"
         )
-    if not Path(str(catalog_path)).exists():
-        return {}
 
-    wb = openpyxl.load_workbook(str(catalog_path), read_only=True)
+    # 若傳入的是檔案物件（BytesIO / UploadedFile），直接用內容載入
+    if hasattr(catalog_path, 'read') or isinstance(catalog_path, io.IOBase):
+        source = _to_bytesio(catalog_path)
+    else:
+        if not Path(str(catalog_path)).exists():
+            return {}
+        source = str(catalog_path)
+
+    wb = openpyxl.load_workbook(source, read_only=True)
     ws = wb.active
     title_cat = {}
     for i, row in enumerate(ws.iter_rows(values_only=True)):
@@ -137,11 +144,13 @@ def parse_kobo(kobo_files):
     """
     agg = {}
     for f in kobo_files:
+        fname = getattr(f, 'name', f'kobo_{id(f)}')
         bio = _to_bytesio(f)
         wb = openpyxl.load_workbook(bio)
         if 'Kobo' not in wb.sheetnames:
             continue
         ws = wb['Kobo']
+        empty_eisbn_counter = 0
         for i, row in enumerate(ws.iter_rows(values_only=True)):
             if i == 0:
                 continue
@@ -152,13 +161,19 @@ def parse_kobo(kobo_files):
             title = str(row[8]).strip() if row[8] else ''
             qty   = float(row[5] or 0)
             amt   = float(row[14] or 0)
+            # eISBN 空白時補流水號，避免同書名不同書種被誤合併
+            if not eisbn:
+                empty_eisbn_counter += 1
+                eisbn = f'__no_eisbn_{fname}_{empty_eisbn_counter}__'
             key = (pub, eisbn, title)
             if key not in agg:
                 agg[key] = [0.0, 0.0]
             agg[key][0] += qty
             agg[key][1] += amt
 
-    result = [(k[0], k[1], k[2], v[0], v[1]) for k, v in agg.items()]
+    # 輸出時還原假 eISBN 為空字串
+    result = [(k[0], k[1] if not k[1].startswith('__no_eisbn_') else '', k[2], v[0], v[1])
+              for k, v in agg.items()]
     result.sort(key=lambda x: -x[3])
     return result
 
@@ -192,11 +207,21 @@ def parse_readmoo(readmoo_file):
     return result
 
 
+def _find_isbn_col(header_row):
+    """從標題列找 ISBN / 書號 / 商品代碼 欄位索引"""
+    for j, h in enumerate(header_row):
+        h_str = str(h)
+        if any(kw in h_str for kw in ['ISBN', '書號', '商品代碼', '商品號']):
+            return j
+    return None
+
+
 def parse_bokuto(bokuto_files):
     """
     博客來：bookwalker.xls（all 分頁）+ bookwalker1.xls（sale_report(O)，雜誌）
     自動依檔名辨識（含 'bookwalker1' → 雜誌）
-    回傳 list of (publisher, '', title, qty, amount)
+    key 改用 (pub, isbn, title) 避免同書名不同書種被合併
+    回傳 list of (publisher, isbn, title, qty, amount)
     """
     agg = {}
     for f in bokuto_files:
@@ -213,25 +238,28 @@ def parse_bokuto(bokuto_files):
 
         ws = wb.sheet_by_name(sheet_name)
         header_found = False
+        isbn_col = None
         for i in range(ws.nrows):
             row = ws.row_values(i)
             if str(row[0]).startswith('結算帳月') or str(row[2]) == '廠商名稱':
                 header_found = True
+                isbn_col = _find_isbn_col(row)
                 continue
             if not header_found or not row[0]:
                 continue
             pub   = str(row[2]).strip()
             title = str(row[3]).strip()
+            isbn  = str(row[isbn_col]).strip() if isbn_col is not None and row[isbn_col] else ''
             qty   = float(row[14] or 0) if is_mag else (
                     float(row[17] or 0) if len(row) > 17 else float(row[14] or 0))
             amt   = float(row[15] or 0)
-            key = (pub, title)
+            key = (pub, isbn, title)
             if key not in agg:
                 agg[key] = [0.0, 0.0]
             agg[key][0] += qty
             agg[key][1] += amt
 
-    result = [(k[0], '', k[1], v[0], v[1]) for k, v in agg.items()]
+    result = [(k[0], k[1], k[2], v[0], v[1]) for k, v in agg.items()]
     result.sort(key=lambda x: -x[3])
     return result
 
@@ -253,6 +281,8 @@ def parse_luanda(luanda_file):
         pub   = str(row[8]).strip()
         title = str(row[6]).strip() if row[6] else ''
         qty   = float(row[12] or 0)
+        if qty == 0:
+            continue  # 跳過零銷售列
         price = float(row[11] or 0)
         fee   = float(row[14] or 0)
         ratio = float(row[15] or 0)
@@ -384,8 +414,8 @@ def _build_sheet(ws, platform, data, genre_catalog):
             ws.cell(r, 4, qty)
             ws.cell(r, 5, round(amt, 4) if amt else 0)
 
-    # 排行資料
-    paid     = [x for x in data if x[3] > 0]
+    # 排行資料（過濾零數量與零金額）
+    paid     = [x for x in data if x[3] > 0 and x[4] > 0]
     top_qty  = sorted(paid, key=lambda x: -x[3])[:20]
     top_amt  = sorted(paid, key=lambda x: -x[4])[:10]
 
