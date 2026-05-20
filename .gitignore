@@ -1,0 +1,22 @@
+# 測試用報表（不要上傳真實銷售數據）
+*.xlsx
+*.xls
+
+# 但保留 requirements.txt（不是報表）
+!requirements.txt
+
+# Python 暫存檔
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 環境設定（如果未來有 API 金鑰）
+.env
+.env.local
+*.env
+
+# 系統檔案
+.DS_Store
+Thumbs.db
