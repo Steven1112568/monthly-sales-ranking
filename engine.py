@@ -298,12 +298,18 @@ def parse_luanda(luanda_file):
     return result
 
 
+def _header_col_map(header_row):
+    """標題列 → {欄名: 欄索引}，欄名去除前後空白"""
+    return {str(h).strip(): j for j, h in enumerate(header_row) if h is not None}
+
+
 def parse_pubu(pubu_files):
     """
     Pubu：合併 PUBU.xls + 誠品.xls + PChome.xls
-    自動依檔名辨識：
-      PUBU → 出版社(2), 商品名稱(3), 您的收入(11)，每列=1冊
-      誠品/PChome → 出版者(6), 商品名稱(4), 收入(15)，每列=1冊
+    自動依檔名辨識，欄位改用標題列名稱查找（不寫死欄索引），
+    避免平台改報表格式（如 PUBU.xls 曾在前方新增「項目/訂單編號/售出時間」欄）時欄位跑掉：
+      PUBU → 出版社, 商品名稱, 您的收入，每列=1冊
+      誠品/PChome → 出版者, 商品名稱, 收入，每列=1冊
     回傳 list of (publisher, '', title, qty, amount)
     """
     agg = {}
@@ -318,17 +324,23 @@ def parse_pubu(pubu_files):
         if is_pubu:
             ws = wb.sheet_by_name('Pubu 訂單報表')
             header_row = -1
+            cols = {}
             for i in range(ws.nrows):
-                if '訂單編號' in str(ws.row_values(i)):
+                row = ws.row_values(i)
+                if '訂單編號' in str(row):
                     header_row = i
+                    cols = _header_col_map(row)
                     break
+            if header_row == -1:
+                raise ValueError(f"{fname}：找不到含「訂單編號」的標題列")
+            pub_col, title_col, amt_col = cols['出版社'], cols['商品名稱'], cols['您的收入']
             for i in range(header_row + 1, ws.nrows):
                 row = ws.row_values(i)
                 if not row[0]:
                     continue
-                pub   = str(row[2]).strip()
-                title = str(row[3]).strip()
-                amt   = float(row[11] or 0)
+                pub   = str(row[pub_col]).strip()
+                title = str(row[title_col]).strip()
+                amt   = float(row[amt_col] or 0)
                 key = (pub, title)
                 if key not in agg:
                     agg[key] = [0.0, 0.0]
@@ -337,13 +349,15 @@ def parse_pubu(pubu_files):
         else:
             # 誠品 or PChome（同格式）
             ws = wb.sheet_by_index(0)
+            cols = _header_col_map(ws.row_values(0))
+            pub_col, title_col, amt_col = cols['出版者'], cols['商品名稱'], cols['收入']
             for i in range(1, ws.nrows):
                 row = ws.row_values(i)
-                if not row[4]:
+                if not row[title_col]:
                     continue
-                pub   = str(row[6]).strip()   # 出版者
-                title = str(row[4]).strip()   # 商品名稱
-                amt   = float(row[15] or 0)   # 收入
+                pub   = str(row[pub_col]).strip()
+                title = str(row[title_col]).strip()
+                amt   = float(row[amt_col] or 0)
                 key = (pub, title)
                 if key not in agg:
                     agg[key] = [0.0, 0.0]
